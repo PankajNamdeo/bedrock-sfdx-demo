@@ -2,7 +2,7 @@ public with sharing class Scenario4Controller {
     
     @AuraEnabled
     public static void closeHighPriorityTickets() {
-        // High-level demo logic: Find all High Priority tickets and close them1
+        // High-level demo logic: Find all High Priority tickets and close them2
         List<Bedrock_Ticket__c> ticketsToUpdate = [
             SELECT Id, Status__c 
             FROM Bedrock_Ticket__c 
