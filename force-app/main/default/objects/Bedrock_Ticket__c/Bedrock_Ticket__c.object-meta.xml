@@ -155,7 +155,7 @@
     <externalSharingModel>Private</externalSharingModel>
     <label>Bedrock Ticket</label>
     <nameField>
-        <label>Bedrock Ticket Name</label>
+        <label>Bedrock Ticket Name.</label>
         <type>Text</type>
     </nameField>
     <pluralLabel>Bedrock Tickets</pluralLabel>
