@@ -1,0 +1,36 @@
+name: Deploy to DevOrg Sandbox
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - feature/vendor-a
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli
+
+      - name: Authenticate to Salesforce
+        run: |
+          echo "${{ secrets.SF_AUTH_URL_DEVORG }}" > auth_url.txt
+          sf org login sfdx-url --sfdx-url-file auth_url.txt --alias target-org
+
+      - name: Run Apex Tests
+        run: |
+          sf apex run test --target-org target-org --test-level RunLocalTests --wait 10
+
+      - name: Deploy to Sandbox
+        run: |
+          sf project deploy start \
+            --target-org target-org \
+            --source-dir force-app \
+            --test-level RunLocalTests \
+            --wait 30
