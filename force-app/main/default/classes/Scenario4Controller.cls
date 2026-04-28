@@ -1,4 +1,4 @@
-// CI/CD Test - Vendor A - Deploy via GitHub Actions
+// CI/CD Demo Run - Vendor A - Take 2sf project deploy start --target-org DevOrg --source-dir force-app
 public with sharing class Scenario4Controller {
     
     @AuraEnabled
