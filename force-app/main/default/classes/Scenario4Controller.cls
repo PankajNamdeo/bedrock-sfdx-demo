@@ -1,3 +1,4 @@
+// CI/CD Test - Vendor A - Deploy via GitHub Actions
 public with sharing class Scenario4Controller {
     
     @AuraEnabled
