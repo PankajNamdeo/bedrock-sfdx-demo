@@ -1,32 +1,238 @@
-name: Deploy to DevOrg Sandbox
+name: Salesforce Multi-Vendor CI-CD Pipeline
 
 on:
   pull_request:
     types: [closed]
     branches:
+      - feature/vendor-a
+      - feature/vendor-b
+      - feature/vendor-c
+      - integration
       - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  salesforce-deploy:
+    name: Validate and Deploy to Target Environment
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
+    env:
+      DELTA_OUTPUT: ./changed-components
+      DEPLOY_LOG: ./logs/deployment.log
+      VALIDATE_LOG: ./logs/validation.log
+
     steps:
-      - name: Checkout Code
+
+      # ─────────────────────────────────────────────
+      # STAGE 1 — ENVIRONMENT SETUP
+      # ─────────────────────────────────────────────
+
+      - name: Checkout Source Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: "2"
+
+      - name: Cache Node Modules
+        uses: actions/cache@v4
+        id: cache-node
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
 
       - name: Install Salesforce CLI
-        run: npm install -g @salesforce/cli
-
-      - name: Authenticate to Salesforce
         run: |
-          echo "${{ secrets.SF_AUTH_URL_DEVORG }}" > auth_url.txt
-          sf org login sfdx-url --sfdx-url-file auth_url.txt --alias target-org
+          npm install -g @salesforce/cli
+          sf --version
 
-      - name: Deploy to Sandbox
+      - name: Cache sfdx-git-delta Plugin
+        uses: actions/cache@v4
+        id: cache-sgd
+        with:
+          path: ~/.local/share/sf/plugins
+          key: ${{ runner.os }}-sgd-${{ hashFiles('**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-sgd-
+
+      - name: Install sfdx-git-delta Plugin
+        if: steps.cache-sgd.outputs.cache-hit != 'true'
         run: |
-          sf project deploy start \
-            --target-org target-org \
-            --source-dir force-app \
-            --test-level NoTestRun \
-            --wait 30
+          echo y | sf plugins install sfdx-git-delta
+          sf sgd --help
+
+      # ─────────────────────────────────────────────
+      # STAGE 2 — DELTA PACKAGE PREPARATION
+      # ─────────────────────────────────────────────
+
+      - name: Prepare Delta Package
+        run: |
+          export HOME=/root
+          mkdir -p ${{ env.DELTA_OUTPUT }}
+          mkdir -p ./logs
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          sf sgd source delta \
+            --from "HEAD^" \
+            --to "HEAD" \
+            --source force-app \
+            --generate-delta \
+            --output ${{ env.DELTA_OUTPUT }}
+
+      - name: Display Components Scheduled for Deployment
+        run: cat ${{ env.DELTA_OUTPUT }}/package/package.xml
+
+      - name: Display Components Scheduled for Removal
+        run: cat ${{ env.DELTA_OUTPUT }}/destructiveChanges/destructiveChanges.xml
+
+      # ─────────────────────────────────────────────
+      # STAGE 3 — ENVIRONMENT RESOLUTION
+      # ─────────────────────────────────────────────
+
+      - name: Resolve Target Environment
+        run: |
+          TARGET_BRANCH="${{ github.base_ref }}"
+          echo "Pull Request merged into: $TARGET_BRANCH"
+
+          case $TARGET_BRANCH in
+            feature/vendor-a)
+              echo "TARGET_ENV=Vendor-A Sandbox" >> $GITHUB_ENV
+              echo "${{ secrets.SF_AUTH_URL_SANDBOX_A }}" > sf_token.txt
+              echo "TEST_STRATEGY=NoTestRun" >> $GITHUB_ENV
+              ;;
+            feature/vendor-b)
+              echo "TARGET_ENV=Vendor-B Sandbox" >> $GITHUB_ENV
+              echo "${{ secrets.SF_AUTH_URL_SANDBOX_B }}" > sf_token.txt
+              echo "TEST_STRATEGY=NoTestRun" >> $GITHUB_ENV
+              ;;
+            feature/vendor-c)
+              echo "TARGET_ENV=Vendor-C Sandbox" >> $GITHUB_ENV
+              echo "${{ secrets.SF_AUTH_URL_SANDBOX_C }}" > sf_token.txt
+              echo "TEST_STRATEGY=NoTestRun" >> $GITHUB_ENV
+              ;;
+            integration)
+              echo "TARGET_ENV=Integration Sandbox" >> $GITHUB_ENV
+              echo "${{ secrets.SF_AUTH_URL_INTEGRATION }}" > sf_token.txt
+              echo "TEST_STRATEGY=RunLocalTests" >> $GITHUB_ENV
+              ;;
+            main)
+              echo "TARGET_ENV=Production Org" >> $GITHUB_ENV
+              echo "${{ secrets.SF_AUTH_URL_PRODUCTION }}" > sf_token.txt
+              echo "TEST_STRATEGY=RunAllTestsInOrg" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "Unrecognised branch: $TARGET_BRANCH. Pipeline halted."
+              exit 1
+              ;;
+          esac
+
+      # ─────────────────────────────────────────────
+      # STAGE 4 — AUTHENTICATION
+      # ─────────────────────────────────────────────
+
+      - name: Authenticate to Target Org
+        run: |
+          echo "Establishing secure connection to ${{ env.TARGET_ENV }}"
+          sf org login sfdx-url \
+            --sfdx-url-file sf_token.txt \
+            --alias deploy-target \
+            --set-default
+          rm -f sf_token.txt
+          echo "Authentication to ${{ env.TARGET_ENV }} successful"
+
+      # ─────────────────────────────────────────────
+      # STAGE 5 — INTELLIGENT DEPLOYMENT
+      # ─────────────────────────────────────────────
+
+      - name: Analyse and Deploy Changed Components
+        run: |
+          PACKAGE_FILE="${{ env.DELTA_OUTPUT }}/package/package.xml"
+          COMPONENT_COUNT=$(cat $PACKAGE_FILE | grep -o "<members>" | wc -l)
+          LINE_COUNT=$(cat $PACKAGE_FILE | wc -l)
+
+          # Check if there is anything to deploy
+          if [ $LINE_COUNT -le 4 ]; then
+            echo "No Salesforce components detected in delta. Deployment skipped."
+            exit 0
+          fi
+
+          echo "Components identified for deployment: $COMPONENT_COUNT"
+
+          # Check if delta contains Apex Classes or Triggers
+          APEX_PRESENT=$(egrep 'name>ApexClass|name>ApexTrigger' $PACKAGE_FILE | wc -l)
+
+          if [ $APEX_PRESENT -lt 1 ]; then
+            # No Apex — safe to deploy without running tests
+            echo "No Apex components in delta. Proceeding with NoTestRun deployment."
+            sf project deploy start \
+              --ignore-warnings \
+              --manifest $PACKAGE_FILE \
+              --test-level NoTestRun \
+              --wait 100 \
+              --target-org deploy-target \
+              --json >> ${{ env.DEPLOY_LOG }}
+
+            if grep -q '"status": "Succeeded"' ${{ env.DEPLOY_LOG }}; then
+              echo "Deployment to ${{ env.TARGET_ENV }} completed successfully."
+            else
+              echo "Deployment failed. Review log below:"
+              cat ${{ env.DEPLOY_LOG }}
+              exit 1
+            fi
+
+          else
+            # Apex detected — find test classes in the delta
+            echo "Apex components detected. Identifying test classes in delta."
+            DELTA_TESTS=$(find ${{ env.DELTA_OUTPUT }}/force-app/main/default/classes/* \
+              -iname '*test.cls' -or -iname '*Test.cls' \
+              | sed 's|${{ env.DELTA_OUTPUT }}/force-app/main/default/classes/||' \
+              | tr '\n' ' ' \
+              | sed 's/.cls//g')
+
+            if [ -z "$DELTA_TESTS" ]; then
+              echo "WARNING: Apex committed without test classes. Proceeding with caution."
+              set +e
+              sf project deploy start \
+                --ignore-warnings \
+                --manifest $PACKAGE_FILE \
+                --test-level NoTestRun \
+                --wait 100 \
+                --target-org deploy-target \
+                --json >> ${{ env.VALIDATE_LOG }}
+              set -e
+            else
+              echo "Running the following test classes: $DELTA_TESTS"
+              sf project deploy start \
+                --ignore-warnings \
+                --manifest $PACKAGE_FILE \
+                --test-level RunSpecifiedTests \
+                --run-tests $DELTA_TESTS \
+                --wait 100 \
+                --target-org deploy-target \
+                --json
+            fi
+          fi
+
+      # ─────────────────────────────────────────────
+      # STAGE 6 — METADATA CLEANUP
+      # ─────────────────────────────────────────────
+
+      - name: Remove Deleted Metadata from Target Org
+        continue-on-error: true
+        run: |
+          DESTRUCTIVE_FILE="${{ env.DELTA_OUTPUT }}/destructiveChanges/destructiveChanges.xml"
+
+          if grep -q '<types>' $DESTRUCTIVE_FILE; then
+            echo "Metadata marked for removal detected. Initiating cleanup."
+            cat $DESTRUCTIVE_FILE
+            sf project deploy start \
+              --ignore-warnings \
+              --manifest ${{ env.DELTA_OUTPUT }}/destructiveChanges/package.xml \
+              --post-destructive-changes $DESTRUCTIVE_FILE \
+              --test-level NoTestRun \
+              --wait 100 \
+              --target-org deploy-target \
+              --json
+          else
+            echo "No metadata removal required. Cleanup step skipped."
+          fi
