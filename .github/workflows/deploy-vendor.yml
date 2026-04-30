@@ -68,7 +68,6 @@ jobs:
 
       - name: Prepare Delta Package
         run: |
-          export HOME=/root
           mkdir -p ${{ env.DELTA_OUTPUT }}
           mkdir -p ./logs
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
